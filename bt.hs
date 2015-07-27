@@ -4,15 +4,16 @@
 
 import System.Environment
 import Data.Char
+import Text.Read
 import Data.Monoid
 import qualified Data.Map.Strict as Map
 import qualified Data.ByteString.Char8 as B
 
-data Bencode = 
-    BInt Int 
-  | BData B.ByteString 
-  | BList [Bencode] 
-  | BMap (Map.Map String Bencode) 
+data Bencode =
+    BInt Int
+  | BData B.ByteString
+  | BList [Bencode]
+  | BMap (Map.Map String Bencode)
   deriving (Ord,Eq)
 
 instance Show Bencode where
@@ -21,64 +22,65 @@ instance Show Bencode where
     show (BList a) = show a
     show (BMap a)  = show a
 
-decodeInt :: B.ByteString -> (Bencode, B.ByteString)
-decodeInt bytes = 
-  let num_str = B.takeWhile (/= 'e') bytes
-      rest    = B.drop (B.length num_str + 1) bytes
-  in (BInt (read (B.unpack num_str) :: Int), rest)
+decodeInt :: B.ByteString -> Maybe (Bencode, B.ByteString)
+decodeInt bytes =
+  case readMaybe (B.unpack num_str) :: Maybe Int of
+       Just num -> Just $ (BInt num, rest)
+       Nothing  -> Nothing
+  where num_str = B.takeWhile (/= 'e') bytes
+        rest    = B.drop (B.length num_str + 1) bytes
 
-decodeString :: B.ByteString -> (Bencode, B.ByteString)
-decodeString bytes = 
-  let len    = B.unpack $ B.takeWhile isDigit bytes 
-      rest   = B.drop (length len + 1) bytes -- +1 because of the ":" -- TODO check this
-      strlen = read len :: Int 
-      str    = B.take strlen rest
-      rest2  = B.drop strlen rest
-  in (BData str, rest2)
+decodeString :: B.ByteString -> Maybe (Bencode, B.ByteString)
+decodeString bytes =
+  case readMaybe len :: Maybe Int  of
+       Nothing     -> Nothing
+       Just strlen -> Just (BData $ B.take strlen rest, B.drop strlen rest)
+  where len  = B.unpack $ B.takeWhile isDigit bytes
+        rest = B.drop (length len + 1) bytes -- +1 because of the ":" -- TODO check this
 
-decodeList :: [Bencode] -> Char -> B.ByteString -> (Bencode, B.ByteString)
-decodeList list 'e' bytes  = (BList $ reverse list, B.drop 1 bytes) 
-decodeList list  _  bytes = 
-  let (element,rest) = decode' bytes
-  in decodeList (element:list) (B.head rest) rest
+decodeList :: [Bencode] -> Char -> B.ByteString -> Maybe (Bencode, B.ByteString)
+decodeList list 'e' bytes = Just (BList $ reverse list, B.drop 1 bytes)
+decodeList list  _  bytes =
+  case decode' bytes of
+    Nothing             -> Nothing
+    Just (element,rest) -> decodeList (element:list) (B.head rest) rest
 
-decodeDict :: Map.Map String Bencode -> B.ByteString -> (Bencode, B.ByteString)
+decodeDict :: Map.Map String Bencode -> B.ByteString -> Maybe (Bencode, B.ByteString)
 decodeDict map bytes =
-  let char             = B.head bytes
-      (BData key,rest) = decodeString bytes
-      (val,rest2)      = decode' rest
-  in if char == 'e' then
-    (BMap map, B.drop 1 bytes)
-  else
-    decodeDict (Map.insert (B.unpack key) val map) rest2
+  case B.uncons bytes of
+    Nothing       -> Nothing
+    Just ('e', _) -> Just (BMap map, B.drop 1 bytes)
+    otherwise     -> case decodeString bytes of
+      Nothing -> Nothing
+      Just (BData key, rest) -> case decode' rest of
+        Nothing -> Nothing
+        Just (val, rest2) -> decodeDict (Map.insert (B.unpack key) val map) rest2
 
-decode' :: B.ByteString -> (Bencode, B.ByteString)
-decode' bytes =
-  let char = B.head bytes
-      rest = B.drop 1 bytes
-  in case char of
-    'i' -> decodeInt rest
-    'l' -> decodeList [] (B.head rest) rest
-    'd' -> decodeDict Map.empty rest
-    otherwise -> decodeString bytes
+decode' :: B.ByteString -> Maybe (Bencode, B.ByteString)
+decode' bytes = case B.uncons bytes of
+    Nothing -> Nothing
+    Just ('i', rest) -> decodeInt rest
+    Just ('l', rest) -> decodeList [] (B.head rest) rest
+    Just ('d', rest) -> decodeDict Map.empty rest
+    otherwise        -> decodeString bytes
 
-decode :: B.ByteString -> Bencode
-decode bytes = 
-  let (result,_) = decode' bytes
-  in result
+decode :: B.ByteString -> Maybe Bencode
+decode bytes = case decode' bytes of
+    Just (result,_) -> Just result
+    Nothing         -> Nothing
 
 decodeFiles :: [String] -> IO ()
 decodeFiles [] = return ()
 decodeFiles (file:files) = do
   body <- B.readFile file
-  let result = decode body
+  let Just result = decode body
   print result
   decodeFiles files
 
 test :: String -> Bencode -> IO ()
 test str result = do
-  let (d,_) = decode' $ B.pack str
-  print 
+  let Just (d,_) = decode' $ B.pack str
+  print
     (if d == result then
       "Test passed: " <> show d
     else
